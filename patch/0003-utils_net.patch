@@ -1,0 +1,11 @@
+--- src/utils/farra/utils_net.c	2019-04-01 17:34:16.296055354 +0800
++++ ../qcloud-iot-sdk-embedded-c/src/utils/farra/utils_net.c	2019-04-01 16:33:04.772055354 +0800
+@@ -134,7 +134,7 @@
+ 	POINTER_SANITY_CHECK(pNetwork, QCLOUD_ERR_INVAL);
+ 
+ 	pNetwork->handle = HAL_TCP_Connect(pNetwork->host, pNetwork->port);
+-	if (0 == pNetwork->handle) {
++	if (-1 == pNetwork->handle) {
+ 		return -1;
+ 	}
+ 	return 0;

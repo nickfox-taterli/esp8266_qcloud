@@ -1,0 +1,37 @@
+--- HAL_TCP_linux.c	2019-04-01 17:15:34.328055354 +0800
++++ ../qcloud/qcloud-iot-sdk-embedded-c/src/platform/os/linux/HAL_TCP_linux.c	2019-04-01 16:28:08.776055354 +0800
+@@ -72,18 +72,15 @@ uintptr_t HAL_TCP_Connect(const char *ho
+ 
+     ret = getaddrinfo(host, port_str, &hints, &addr_list);
+     if (ret) {   
+-        if (ret == EAI_SYSTEM)
+-            Log_e("getaddrinfo(%s:%s) error: %s", host, port_str, strerror(errno));
+-        else
+-            Log_e("getaddrinfo(%s:%s) error: %s", host, port_str, gai_strerror(ret));
+-        return 0;
++        Log_e("getaddrinfo(%s:%s) error: %s", host, port_str, strerror(errno));
++        return errno;
+     }
+ 
+     for (cur = addr_list; cur != NULL; cur = cur->ai_next) {
+     	fd = (int) socket( cur->ai_family, cur->ai_socktype, cur->ai_protocol );
+ 		if( fd < 0 )
+ 		{
+-			ret = 0;
++			ret = errno;
+ 			continue;
+ 		}
+ 
+@@ -94,10 +91,10 @@ uintptr_t HAL_TCP_Connect(const char *ho
+ 		}
+ 
+ 		close( fd );
+-		ret = 0;
++		ret = errno;
+     }
+ 
+-    if (0 == ret) {
++    if (0 != errno) {
+         Log_e("fail to connect with TCP server: %s:%s", host, port_str);
+     } else {
+         /* reduce log print due to frequent log server connect/disconnect */

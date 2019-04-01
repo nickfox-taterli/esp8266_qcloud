@@ -1,0 +1,11 @@
+--- qcloud_iot_export.h	2019-04-01 17:15:34.332055354 +0800
++++ ../qcloud/qcloud-iot-sdk-embedded-c/src/sdk-impl/qcloud_iot_export.h	2019-04-01 17:14:21.476055354 +0800
+@@ -37,7 +37,7 @@ extern "C" {
+ 
+ 
+ /* TLS连接握手超时时间, 单位:ms */
+-#define QCLOUD_IOT_TLS_HANDSHAKE_TIMEOUT                            (5 * 1000)
++#define QCLOUD_IOT_TLS_HANDSHAKE_TIMEOUT                            (30 * 1000)
+ 
+ /* 设备ID的最大长度, 必须保持唯一 */
+ #define MAX_SIZE_OF_CLIENT_ID                                       (80)
