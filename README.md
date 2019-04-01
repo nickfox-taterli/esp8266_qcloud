@@ -4,7 +4,7 @@
 
 ## 1. 概述
 
-ESP8266 适配了[腾讯云](https://cloud.tencent.com) 设备端 C-SDK v2.0.0 版本, 用户可以参考 Espressif 提供的设备端 MQTT Demo 进行二次开发，快速接入腾讯云平台。
+ESP8266 适配了[腾讯云](https://cloud.tencent.com) 设备端 C-SDK v2.1.0 版本, 用户可以参考 Espressif 提供的设备端 MQTT Demo 进行二次开发，快速接入腾讯云平台。
 
 MQTT Demo 参考腾讯官方 [qcloud-iot-sdk-embedded-c v2.1.0](https://github.com/tencentyun/qcloud-iot-sdk-embedded-c) 里的 demo，添加了基于 esp32 的 WiFi 连接、File 存储等相关功能，用户可根据产品需求自行添加或删减相关功能
 
@@ -29,6 +29,8 @@ ESP_IDF请自行配置,新版的ESP8266_RTOS_SDK也是ESP_IDF配置的.
 make && make flash && make monitor
 
 ```
+
+### 3. 其他链接
 
 * Espressif 官网： [http://espressif.com](http://espressif.com)
 * TaterLi 个人博客： [http://www.lijingquan.net](http://www.lijingquan.net)
