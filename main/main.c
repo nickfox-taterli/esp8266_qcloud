@@ -1,27 +1,3 @@
-/*
- * ESPRESSIF MIT License
- *
- * Copyright (c) 2018 <ESPRESSIF SYSTEMS (SHANGHAI) PTE LTD>
- *
- * Permission is hereby granted for use on ESPRESSIF SYSTEMS chips only, in which case,
- * it is free of charge, to any person obtaining a copy of this software and associated
- * documentation files (the "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the Software is furnished
- * to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all copies or
- * substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- *
- */
-
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -32,179 +8,67 @@
 
 #include "qcloud_iot_export.h"
 #include "qcloud_iot_import.h"
+#include "lite-utils.h"
+#include "shadow_client.h"
 
-/* 测试路由器帐号  */
-#define TEST_WIFI_SSID                 "xxxxx"
-/* 测试路由器密码  */
-#define TEST_WIFI_PASSWORD             "xxxxx"
-/* 产品名称, 与云端同步设备状态时需要  */
-#define QCLOUD_IOT_MY_PRODUCT_ID       "VUCGL7FQ04"
-/* 设备名称, 与云端同步设备状态时需要 */
-#define QCLOUD_IOT_MY_DEVICE_NAME      "ESP8266"
+/* 影子操作所需MQTT的缓冲区也较大,QCLOUD_IOT_MQTT_TX_BUF_LEN和QCLOUD_IOT_MQTT_RX_BUF_LEN需要大一些. */
 
-#define MAX_SIZE_OF_TOPIC_CONTENT 100
+/* QCLOUD总钥匙ID */
+#define QCLOUD_SECRETID				"AKIDb092f45G7kBPPCu8GAqIWWJsDKDsrWWI"
+/* QCLOUD总钥匙密码 */
+#define QCLOUD_SECRETKEY			"g9OQEvOefT2NUN2SbU6RWKr76oGRM0OW"
+/* 测试路由器帐号 */
+#define TEST_WIFI_SSID				"TaterLiEnt"
+/* 测试路由器密码 */
+#define TEST_WIFI_PASSWORD			"TaterLi1024"
+/* 产品名称 */
+#define QCLOUD_IOT_MY_PRODUCT_ID		"VUCGL7FQ04"
+/* 设备名称 */
+#define QCLOUD_IOT_MY_DEVICE_NAME		"ESP8266"
+/* 设备订阅主题 */
+#define QCLOUD_IOT_TOPIC_SUB			"control"
+/* 设备发布主题 */
+#define QCLOUD_IOT_TOPIC_PUB			"event"
+/* 设备密码 */
+#define QCLOUD_IOT_DEVICE_SECRET		"cCzadEUBvpWL3p7mEK+Nog=="
+/* JSON缓冲区大小 */
+#define MAX_LENGTH_OF_UPDATE_JSON_BUFFER	200
+/* 接收缓冲区大小 */
+#define MAX_RECV_LEN 				(512 + 1)
+/* 发送缓冲区大小 */
+#define MAX_SIZE_OF_TOPIC_CONTENT 		100
 
-#define QCLOUD_IOT_PSK                  "cCzadEUBvpWL3p7mEK+Nog=="
+static int Shadow_Temperature_Desire = 20; /* 远程设定期望温度 */
+static int Shadow_Temperature_Actual = 20; /* 采样本地实际温度(没有实际做采样) */
 
-static const int CONNECTED_BIT = BIT0;
-static const char* TAG = "esp32-qcloud-mqtt-demo";
-static int sg_count = 0;
-static int sg_sub_packet_id = -1;
-static EventGroupHandle_t wifi_event_group;
+static DeviceProperty Shadow_Temperature_Actual_Prop; /* 实际温度描述符 */
+static DeviceProperty Shadow_Temperature_Desire_Prop; /* 期望温度描述符 */
 
-bool log_handler(const char* message)
-{
-    //实现日志回调的写方法
-    //实现内容后请返回true
-    return false;
-}
+static bool Temperature_Desire_Set_Signal = false; /* 是否改变了温度,如果是,则需要读出. */
 
-void mqtt_demo_event_handler(void* pclient, void* handle_context, MQTTEventMsg* msg)
-{
-    MQTTMessage* mqtt_messge = (MQTTMessage*)msg->msg;
-    uintptr_t packet_id = (uintptr_t)msg->msg;
+static MQTTEventType Shadow_Subscribe_Event_Result = MQTT_EVENT_UNDEF; /* 当前状态 */
+static bool Shadow_Sync_Finish = false; /* 开机同步结果 */
 
-    switch (msg->event_type) {
-        case MQTT_EVENT_UNDEF:
-            ESP_LOGI(TAG, "undefined event occur.");
-            break;
+char Shadow_Document_Buffer[MAX_LENGTH_OF_UPDATE_JSON_BUFFER]; /* 影子缓冲区 */
+size_t Shadow_Document_Buffersize = sizeof(Shadow_Document_Buffer) / sizeof(Shadow_Document_Buffer[0]); /* 影子缓冲区大小 */
 
-        case MQTT_EVENT_DISCONNECT:
-            ESP_LOGI(TAG, "MQTT disconnect.");
-            break;
+/* WIFI连接位 */
+static const int CONNECTED_BIT = BIT0; 
+static EventGroupHandle_t wifi_event_group; 
 
-        case MQTT_EVENT_RECONNECT:
-            ESP_LOGI(TAG, "MQTT reconnect.");
-            break;
-
-        case MQTT_EVENT_PUBLISH_RECVEIVED:
-            ESP_LOGI(TAG, "topic message arrived but without any related handle: topic=%d-%s, topic_msg=%d-%s",
-                     mqtt_messge->topic_len,
-                     (char*)mqtt_messge->ptopic,
-                     mqtt_messge->payload_len,
-                     (char*)mqtt_messge->payload);
-            break;
-
-        case MQTT_EVENT_SUBCRIBE_SUCCESS:
-            ESP_LOGI(TAG, "subscribe success, packet-id=%u", (unsigned int)packet_id);
-            sg_sub_packet_id = packet_id;
-            break;
-
-        case MQTT_EVENT_SUBCRIBE_TIMEOUT:
-            ESP_LOGI(TAG, "subscribe wait ack timeout, packet-id=%u", (unsigned int)packet_id);
-            sg_sub_packet_id = packet_id;
-            break;
-
-        case MQTT_EVENT_SUBCRIBE_NACK:
-            ESP_LOGI(TAG, "subscribe nack, packet-id=%u", (unsigned int)packet_id);
-            sg_sub_packet_id = packet_id;
-            break;
-
-        case MQTT_EVENT_UNSUBCRIBE_SUCCESS:
-            ESP_LOGI(TAG, "unsubscribe success, packet-id=%u", (unsigned int)packet_id);
-            break;
-
-        case MQTT_EVENT_UNSUBCRIBE_TIMEOUT:
-            ESP_LOGI(TAG, "unsubscribe timeout, packet-id=%u", (unsigned int)packet_id);
-            break;
-
-        case MQTT_EVENT_UNSUBCRIBE_NACK:
-            ESP_LOGI(TAG, "unsubscribe nack, packet-id=%u", (unsigned int)packet_id);
-            break;
-
-        case MQTT_EVENT_PUBLISH_SUCCESS:
-            ESP_LOGI(TAG, "publish success, packet-id=%u", (unsigned int)packet_id);
-            break;
-
-        case MQTT_EVENT_PUBLISH_TIMEOUT:
-            ESP_LOGI(TAG, "publish timeout, packet-id=%u", (unsigned int)packet_id);
-            break;
-
-        case MQTT_EVENT_PUBLISH_NACK:
-            ESP_LOGI(TAG, "publish nack, packet-id=%u", (unsigned int)packet_id);
-            break;
-
-        default:
-            ESP_LOGI(TAG, "Should NOT arrive here.");
-            break;
-    }
-}
+nvs_handle nvs;
 
 /**
- * MQTT消息接收处理函数
- *
- * @param topicName         topic主题
- * @param topicNameLen      topic长度
- * @param message           已订阅消息的结构
- * @param userData         消息负载
+ * 发布数据
  */
-static void on_message_callback(void* pClient, MQTTMessage* message, void* userData)
-{
-    if (message == NULL) {
-        return;
-    }
-
-    ESP_LOGI(TAG, "Receive Message With topicName:%.*s, payload:%.*s",
-             (int) message->topic_len, message->ptopic, (int) message->payload_len, (char*) message->payload);
-}
-
-/**
- * 设置MQTT connet初始化参数
- *
- * @param initParams MQTT connet初始化参数
- *
- * @return 0: 参数初始化成功  非0: 失败
- */
-
-static int setup_connect_init_params(MQTTInitParams* initParams)
-{
-    initParams->device_name = QCLOUD_IOT_MY_DEVICE_NAME;
-    initParams->product_id = QCLOUD_IOT_MY_PRODUCT_ID;
-
-#ifndef NOTLS_ENABLED
-#ifdef ASYMC_ENCRYPTION_ENABLED
-    /* 使用非对称加密*/
-    sprintf(sg_cert_file, "%s/%s", base_path, QCLOUD_IOT_CERT_FILENAME);
-    sprintf(sg_key_file, "%s/%s", base_path, QCLOUD_IOT_KEY_FILENAME);
-
-    initParams->cert_file = sg_cert_file;
-    initParams->key_file = sg_key_file;
-#else
-    initParams->device_secret = QCLOUD_IOT_PSK;
-#endif
-#endif
-
-    initParams->command_timeout = QCLOUD_IOT_MQTT_COMMAND_TIMEOUT;
-    initParams->keep_alive_interval_ms = QCLOUD_IOT_MQTT_KEEP_ALIVE_INTERNAL;
-
-    initParams->auto_connect_enable = 1;
-    initParams->event_handle.h_fp = mqtt_demo_event_handler;
-    initParams->event_handle.context = NULL;
-
-    return QCLOUD_ERR_SUCCESS;
-}
-
-/**
- * 发送topic消息
- *
- */
-static int _publish_msg(void* client)
+static int MQTT_Publish_Topic(void *client, char *topic_content)
 {
     char topicName[128] = {0};
-    sprintf(topicName, "%s/%s/%s", QCLOUD_IOT_MY_PRODUCT_ID, QCLOUD_IOT_MY_DEVICE_NAME, "event");
+
+    sprintf(topicName, "%s/%s/%s", QCLOUD_IOT_MY_PRODUCT_ID, QCLOUD_IOT_MY_DEVICE_NAME, QCLOUD_IOT_TOPIC_PUB);
 
     PublishParams pub_params = DEFAULT_PUB_PARAMS;
     pub_params.qos = QOS1;
-
-    char topic_content[MAX_SIZE_OF_TOPIC_CONTENT + 1] = {0};
-
-    int size = HAL_Snprintf(topic_content, sizeof(topic_content), "{\"action\": \"publish_test\", \"count\": \"%d\"}", sg_count++);
-
-    if (size < 0 || size > sizeof(topic_content) - 1) {
-        ESP_LOGE(TAG, "payload content length not enough! content size:%d  buf size:%d", size, (int)sizeof(topic_content));
-        return -3;
-    }
-
     pub_params.payload = topic_content;
     pub_params.payload_len = strlen(topic_content);
 
@@ -212,81 +76,258 @@ static int _publish_msg(void* client)
 }
 
 /**
- * 订阅关注topic和注册相应回调处理
- *
+ * 每一次Shadow调用成功与否都回调此函数.
  */
-static int _register_subscribe_topics(void* client)
+static void Shadow_Request_Handler(void *pClient, Method method, RequestAck status, const char *jsonDoc, void *userData) 
 {
-    static char topic_name[128] = {0};
-    static char user_data[128] = {0};
-    int size = HAL_Snprintf(topic_name, sizeof(topic_name), "%s/%s/%s", QCLOUD_IOT_MY_PRODUCT_ID, QCLOUD_IOT_MY_DEVICE_NAME, "control");
-
-    if (size < 0 || size > sizeof(topic_name) - 1) {
-        Log_e("topic content length not enough! content size:%d  buf size:%d", size, (int)sizeof(topic_name));
-        return QCLOUD_ERR_FAILURE;
-    }
-
-    SubscribeParams sub_params = DEFAULT_SUB_PARAMS;
-    sub_params.on_message_handler = on_message_callback;
-    sub_params.user_data = user_data;
-    return IOT_MQTT_Subscribe(client, topic_name, &sub_params);
+    if (status == ACK_ACCEPTED && method == UPDATE) {
+        if (Temperature_Desire_Set_Signal)  /* 需要更新期望数据,更新后就要取消标志. */
+            Temperature_Desire_Set_Signal = false;
+    } else if (status == ACK_ACCEPTED && method == GET) {
+        Shadow_Sync_Finish = true; 
+    } else if (status == ACK_TIMEOUT && method == UPDATE) {
+		esp_restart(); /* 更新失败,通常是因为Socket意外关闭,或者WIFI不稳定,不如重启. */
+    } else if(status == ACK_TIMEOUT && method == GET && Shadow_Sync_Finish == false){
+		esp_restart(); /* 开机同步失败,通常网络实在太差了. */
+	}
 }
 
-void qcloud_mqtt_demo(void)
+/**
+ * MQTT消息接收处理函数
+ */
+static void IOT_Subscribe_Callback(void *pClient, MQTTMessage *message, void *userData) 
 {
-    IOT_Log_Set_Level(DEBUG);
-    IOT_Log_Set_MessageHandler(log_handler);
+    if (message == NULL)
+        return;
 
-    int rc;
+    Log_i("Receive Message With topicName:%.*s, payload:%.*s",(int) message->topic_len, message->ptopic, (int) message->payload_len, (char *) message->payload);
 
-    MQTTInitParams init_params = DEFAULT_MQTTINIT_PARAMS;
+}
 
-    rc = setup_connect_init_params(&init_params);
+/**
+ * 期望温度数据收到
+ */
+static void Temperature_Desire_Set_Callback(void *pClient, const char *jsonResponse, uint32_t responseLen, DeviceProperty *context) 
+{
+    esp_err_t err = nvs_flash_init();
+
+    if (context != NULL) {
+        Log_i("Desire Temperature : %d", *(int *) context->data);
+		 err = nvs_open("nvs", NVS_READWRITE, &nvs);
+		 if (err == ESP_OK) {
+			nvs_set_i32(nvs, "temperature", *(int *) context->data);
+			nvs_commit(nvs);
+		 }
+        Temperature_Desire_Set_Signal = true;
+    }
+}
+
+/**
+ * MQTT包到达回调
+ */
+static void Mqtt_Event_Handler(void *pclient, void *handle_context, MQTTEventMsg *msg) 
+{	
+	/* uintptr_t packet_id = (uintptr_t)msg->msg; */
+
+	switch(msg->event_type) {
+		case MQTT_EVENT_UNDEF:
+			break;
+
+		case MQTT_EVENT_DISCONNECT:
+			break;
+
+		case MQTT_EVENT_RECONNECT:
+			break;
+
+		case MQTT_EVENT_SUBCRIBE_SUCCESS:
+            Shadow_Subscribe_Event_Result = msg->event_type;
+			break;
+
+		case MQTT_EVENT_SUBCRIBE_TIMEOUT:
+            Shadow_Subscribe_Event_Result = msg->event_type;
+			break;
+
+		case MQTT_EVENT_SUBCRIBE_NACK:
+            Shadow_Subscribe_Event_Result = msg->event_type;
+			break;
+
+		case MQTT_EVENT_PUBLISH_SUCCESS:
+			break;
+
+		case MQTT_EVENT_PUBLISH_TIMEOUT:
+			break;
+
+		case MQTT_EVENT_PUBLISH_NACK:
+			break;
+		default:
+			break;
+	}
+}
+
+/**
+ * 上报影子数据.
+ */
+static int Report_Temperature_Actual(void *client) 
+{
+	/* Shadow_Temperature_Actual_Prop 就是实际温度,在主函数内应该修改.*/
+    int rc = IOT_Shadow_JSON_ConstructReport(client, Shadow_Document_Buffer, Shadow_Document_Buffersize, 1, &Shadow_Temperature_Actual_Prop);
 
     if (rc != QCLOUD_ERR_SUCCESS) {
-        ESP_LOGE(TAG, "setup_connect_init_params Failed");
-        return;
+        return rc;
     }
 
-    void* client = IOT_MQTT_Construct(&init_params);
+    rc = IOT_Shadow_Update(client, Shadow_Document_Buffer, Shadow_Document_Buffersize, Shadow_Request_Handler, NULL, QCLOUD_IOT_MQTT_COMMAND_TIMEOUT);
 
-    if (client != NULL) {
-        ESP_LOGI(TAG, "Cloud Device Construct Success");
-    } else {
-        ESP_LOGE(TAG, "Cloud Device Construct Failed");
-        return;
+    if (rc != QCLOUD_ERR_SUCCESS) {
+        return rc;
     }
 
-    rc = _register_subscribe_topics(client);
-
-    if (rc < 0) {
-        ESP_LOGE(TAG, "Client Subscribe Topic Failed: %d", rc);
-        return;
-    }
-
-    do {
-        if (sg_sub_packet_id > 0) {
-            if (_publish_msg(client) < 0) {
-                ESP_LOGE(TAG, "client publish topic failed :%d.", rc);
-            }
-        }
-
-        rc = IOT_MQTT_Yield(client, 5000);
-
-        if (rc == QCLOUD_ERR_MQTT_ATTEMPTING_RECONNECT) {
-            vTaskDelay(1000);
-            continue;
-        } else if (rc != QCLOUD_ERR_SUCCESS && rc != QCLOUD_ERR_MQTT_RECONNECTED) {
-            ESP_LOGE(TAG, "exit with error: %d", rc);
-            break;
-        }
-
-    } while (1);
-
-    IOT_MQTT_Destroy(&client);
+    return rc;
 }
 
-void qcloud_example_task(void* parm)
+/**
+ * 收到影子调用,然后取出数据.
+ */
+static int Read_Temperature_Disire(void *client) 
+{
+    /* 收到信息,需要设置完属性,然后清空期望,否则一直存在,直到主动清除. */
+
+    int rc;
+    rc = IOT_Shadow_JSON_ConstructReportAndDesireAllNull(client, Shadow_Document_Buffer, Shadow_Document_Buffersize, 1, &Shadow_Temperature_Desire_Prop);
+	
+	if (rc != QCLOUD_ERR_SUCCESS) {
+		return rc;
+	}
+
+	rc = IOT_Shadow_Update(client, Shadow_Document_Buffer, Shadow_Document_Buffersize, Shadow_Request_Handler, NULL, QCLOUD_IOT_MQTT_COMMAND_TIMEOUT);
+
+    if (rc != QCLOUD_ERR_SUCCESS) {
+        return rc;
+    }
+
+    return rc;
+}
+
+/**
+ * 订阅主题
+ */
+static int IOT_Subscribe_Topics(void *client)
+{
+    static char topic_name[128] = {0};
+
+    HAL_Snprintf(topic_name, sizeof(topic_name), "%s/%s/%s", QCLOUD_IOT_MY_PRODUCT_ID, QCLOUD_IOT_MY_DEVICE_NAME, QCLOUD_IOT_TOPIC_SUB);
+
+    SubscribeParams sub_params = DEFAULT_SUB_PARAMS;
+    sub_params.qos = QOS1;
+    sub_params.on_message_handler = IOT_Subscribe_Callback;
+    return IOT_Shadow_Subscribe(client, topic_name, &sub_params);
+}
+
+int mqtt_loop(void)
+{
+    int rc = 0;
+    esp_err_t err = nvs_flash_init();
+
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+	ESP_ERROR_CHECK( err );
+	
+    err = nvs_open("nvs", NVS_READWRITE, &nvs);
+    if (err == ESP_OK) {
+        nvs_get_i32(nvs, "temperature", &Shadow_Temperature_Desire);
+		Log_i("Desire Temperature : %d", Shadow_Temperature_Desire);
+        nvs_close(nvs);
+    }
+      
+    IOT_Log_Set_Level(DEBUG);
+
+    ShadowInitParams IOT_Init_Params = DEFAULT_SHAWDOW_INIT_PARAMS;
+	
+	IOT_Init_Params.device_name = QCLOUD_IOT_MY_DEVICE_NAME;
+	IOT_Init_Params.product_id = QCLOUD_IOT_MY_PRODUCT_ID;
+
+    IOT_Init_Params.device_secret = QCLOUD_IOT_DEVICE_SECRET;
+
+	IOT_Init_Params.auto_connect_enable = 1;
+    IOT_Init_Params.event_handle.h_fp = Mqtt_Event_Handler;
+
+
+    void *client = IOT_Shadow_Construct(&IOT_Init_Params);
+    if (client != NULL) {
+		/* 链接OK */
+        Log_i("Cloud Device Construct Success");
+    } else {
+		/* 链接失败 */
+        Log_e("Cloud Device Construct Failed");
+		esp_restart();
+    }
+
+	/* 由于资源限制,类型只能是JINT/JUNIT.宽度是8/16/32. */
+
+    /* 实际温度: 设备 ---> 影子 <---> API(远程) */
+    Shadow_Temperature_Actual_Prop.key = "temperatureActual";
+    Shadow_Temperature_Actual_Prop.data = &Shadow_Temperature_Actual;
+    Shadow_Temperature_Actual_Prop.type = JINT8;
+    /* 预期温度: API(远程) ---> 影子 <---> 设备 */
+    Shadow_Temperature_Desire_Prop.key = "temperatureDesire";
+    Shadow_Temperature_Desire_Prop.data = &Shadow_Temperature_Desire;
+    Shadow_Temperature_Desire_Prop.type = JINT8;
+    /* 当远程预期温度被设置时,访问回调. */
+    IOT_Shadow_Register_Property(client, &Shadow_Temperature_Desire_Prop, Temperature_Desire_Set_Callback);
+
+
+    /* 先同步一下远程版本. */
+    IOT_Shadow_Get(client, Shadow_Request_Handler, NULL, QCLOUD_IOT_MQTT_COMMAND_TIMEOUT);
+    while(Shadow_Sync_Finish == false)
+    {
+	if(rc++ > 5) esp_restart(); /* 初始化太久,一般网络出毛病了. */ 
+        Log_i("Wait for Shadow Sync"); 
+        IOT_Shadow_Yield(client, 200);
+        vTaskDelay(100);
+    }
+    /* 订阅默认的主题 */
+    rc = IOT_Subscribe_Topics(client);
+    if (rc < 0) {
+        Log_e("Client Subscribe Topic Failed: %d", rc);
+		vTaskDelay(5000);
+		esp_restart();
+    }
+    
+    while (IOT_Shadow_IsConnected(client) || rc == QCLOUD_ERR_MQTT_ATTEMPTING_RECONNECT || rc == QCLOUD_ERR_MQTT_RECONNECTED) {
+
+        rc = IOT_Shadow_Yield(client, 200);
+
+        if (rc == QCLOUD_ERR_MQTT_ATTEMPTING_RECONNECT) {
+            vTaskDelay(1);
+            continue;
+        }
+		else if (rc != QCLOUD_ERR_SUCCESS) {
+			esp_restart();
+		}
+
+		/* 收到需要设置的数据 */
+        if (Temperature_Desire_Set_Signal) 
+            Read_Temperature_Disire(client);
+        
+        if (Temperature_Desire_Set_Signal == false){
+			if(Shadow_Temperature_Desire > Shadow_Temperature_Actual) Shadow_Temperature_Actual++;
+			if(Shadow_Temperature_Desire < Shadow_Temperature_Actual) Shadow_Temperature_Actual--;
+			Report_Temperature_Actual(client);
+            /* 因为是异步调用,调用下一个发送前,先延迟一下. */
+			vTaskDelay(1000);
+			MQTT_Publish_Topic(((Qcloud_IoT_Shadow *)client)->mqtt,"{\"action\":\"Hello\"}");
+		}
+	vTaskDelay(1000);
+    }
+
+    rc = IOT_Shadow_Destroy(client);
+
+    return rc;
+}
+
+void mqtt_main(void* parm)
 {
     EventBits_t uxBits;
 
@@ -294,11 +335,11 @@ void qcloud_example_task(void* parm)
         uxBits = xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT, true, false, portMAX_DELAY);
 
         if (uxBits & CONNECTED_BIT) {
-            ESP_LOGI(TAG, "WiFi Connected to ap");
-            qcloud_mqtt_demo();
+            mqtt_loop();
         }
     }
 }
+
 
 static void wifi_connection(void)
 {
@@ -308,32 +349,29 @@ static void wifi_connection(void)
             .password = TEST_WIFI_PASSWORD,
         },
     };
-    ESP_LOGI(TAG, "Setting WiFi configuration SSID %s...", wifi_config.sta.ssid);
 
-    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
-
+    esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config);
     esp_wifi_connect();
 }
 
-static esp_err_t event_handler(void* ctx, system_event_t* event)
-{
-    ESP_LOGI(TAG, "event = %d", event->event_id);
 
+static esp_err_t wifi_event_handler(void* ctx, system_event_t* event)
+{
     switch (event->event_id) {
         case SYSTEM_EVENT_STA_START:
-            ESP_LOGI(TAG, "SYSTEM_EVENT_STA_START");
-            xTaskCreate(qcloud_example_task, "qcloud_example_task", 10240, NULL, 3, NULL);
+			/* 系统启动 */
+            xTaskCreate(mqtt_main, "mqtt_main", 5120, NULL, 3, NULL);
             wifi_connection();
             break;
 
         case SYSTEM_EVENT_STA_GOT_IP:
-            ESP_LOGI(TAG, "Got IPv4[%s]", ip4addr_ntoa(&event->event_info.got_ip.ip_info.ip));
+			/* 已经链接,IP字符串:ip4addr_ntoa(&event->event_info.got_ip.ip_info.ip) */
             xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
 
             break;
 
         case SYSTEM_EVENT_STA_DISCONNECTED:
-            ESP_LOGI(TAG, "SYSTEM_EVENT_STA_DISCONNECTED");
+            /* 断开 */
             xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
             esp_wifi_connect();
             break;
@@ -345,22 +383,22 @@ static esp_err_t event_handler(void* ctx, system_event_t* event)
     return ESP_OK;
 }
 
-static void esp32_wifi_initialise(void)
+static void wifi_initialise(void)
 {
     tcpip_adapter_init();
 
     wifi_event_group = xEventGroupCreate();
-    ESP_ERROR_CHECK(esp_event_loop_init(event_handler, NULL));
+    esp_event_loop_init(wifi_event_handler, NULL);
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+    esp_wifi_init(&cfg);
+    esp_wifi_set_storage(WIFI_STORAGE_RAM);
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_start();
 }
 
 void app_main()
 {
-    ESP_ERROR_CHECK(nvs_flash_init());
-    esp32_wifi_initialise();
+    nvs_flash_init();
+    wifi_initialise();
 }
